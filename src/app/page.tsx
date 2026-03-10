@@ -60,6 +60,7 @@ export default function Home() {
   const startPolling = useCallback(
     (jobId: string) => {
       let consecutiveErrors = 0;
+      let lastHttpStatus = 0;
       const pollStart = Date.now();
 
       pollRef.current = setInterval(async () => {
@@ -68,6 +69,8 @@ export default function Home() {
             `/api/analyze/status?jobId=${encodeURIComponent(jobId)}`
           );
 
+          lastHttpStatus = res.status;
+
           if (!res.ok) {
             if (res.status === 404 && Date.now() - pollStart < INIT_GRACE_MS) {
               return;
@@ -75,7 +78,13 @@ export default function Home() {
             consecutiveErrors++;
             if (consecutiveErrors >= 10) {
               stopPolling();
-              setError("Lost connection to analysis job.");
+              const elapsed = Math.round((Date.now() - pollStart) / 1000);
+              setError(
+                `Lost connection to analysis job after ${elapsed}s. ` +
+                `Last HTTP status: ${lastHttpStatus}. ` +
+                `Job ID: ${jobId}. ` +
+                `Check the terminal running 'npm run dev' for server-side logs.`
+              );
               setAppState("error");
             }
             return;
@@ -97,11 +106,15 @@ export default function Home() {
             setError(data.error || "Analysis failed on the server.");
             setAppState("error");
           }
-        } catch {
+        } catch (e) {
           consecutiveErrors++;
           if (consecutiveErrors >= 10) {
             stopPolling();
-            setError("Network error while polling for results.");
+            const msg = e instanceof Error ? e.message : "unknown";
+            setError(
+              `Network error while polling (${msg}). ` +
+              `Check the terminal running 'npm run dev' for server-side logs.`
+            );
             setAppState("error");
           }
         }

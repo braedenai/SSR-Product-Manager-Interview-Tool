@@ -26,16 +26,21 @@ let lastCallTs = 0;
 async function paceCall(): Promise<void> {
   const elapsed = Date.now() - lastCallTs;
   if (lastCallTs > 0 && elapsed < callDelay) {
-    await sleep(callDelay - elapsed);
+    const wait = callDelay - elapsed;
+    await sleep(wait);
   }
   lastCallTs = Date.now();
 }
 
 function adaptPacing(hitLimit: boolean): void {
+  const prev = callDelay;
   if (hitLimit) {
     callDelay = Math.min(callDelay * 1.5, MAX_DELAY);
   } else {
     callDelay = Math.max(callDelay * 0.85, MIN_DELAY);
+  }
+  if (Math.abs(prev - callDelay) > 50) {
+    console.log(`[gemini] Pacing adjusted: ${Math.round(prev)}ms -> ${Math.round(callDelay)}ms`);
   }
 }
 
@@ -46,7 +51,7 @@ function isRetryable(err: unknown): boolean {
   );
 }
 
-async function withRetry<T>(fn: () => Promise<T>): Promise<T> {
+async function withRetry<T>(label: string, fn: () => Promise<T>): Promise<T> {
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
     try {
       await paceCall();
@@ -54,9 +59,15 @@ async function withRetry<T>(fn: () => Promise<T>): Promise<T> {
       adaptPacing(false);
       return result;
     } catch (err) {
-      if (!isRetryable(err) || attempt === MAX_RETRIES) throw err;
+      const msg = err instanceof Error ? err.message : String(err);
+      if (!isRetryable(err) || attempt === MAX_RETRIES) {
+        console.error(`[gemini] ${label} FAILED (attempt ${attempt + 1}/${MAX_RETRIES + 1}, non-retryable): ${msg}`);
+        throw err;
+      }
+      const backoff = BACKOFFS[attempt] ?? 20000;
+      console.warn(`[gemini] ${label} retryable error (attempt ${attempt + 1}/${MAX_RETRIES + 1}), waiting ${backoff}ms: ${msg}`);
       adaptPacing(true);
-      await sleep(BACKOFFS[attempt] ?? 20000);
+      await sleep(backoff);
     }
   }
   throw new Error("Max retries exceeded");
@@ -67,7 +78,7 @@ export async function generatePersonaResponse(
   systemPrompt: string,
   userPrompt: string
 ): Promise<string> {
-  return withRetry(async () => {
+  return withRetry("generateContent", async () => {
     const genAI = getGenAI(apiKey);
     const model = genAI.getGenerativeModel({
       model: "gemini-2.5-flash-preview-04-17",
@@ -86,7 +97,7 @@ export async function getEmbedding(
   apiKey: string,
   text: string
 ): Promise<number[]> {
-  return withRetry(async () => {
+  return withRetry("embedContent", async () => {
     const genAI = getGenAI(apiKey);
     const model = genAI.getGenerativeModel({
       model: "text-embedding-004",
@@ -101,8 +112,8 @@ export async function getEmbeddings(
   texts: string[]
 ): Promise<number[][]> {
   const results: number[][] = [];
-  for (const text of texts) {
-    results.push(await getEmbedding(apiKey, text));
+  for (let i = 0; i < texts.length; i++) {
+    results.push(await getEmbedding(apiKey, texts[i]));
   }
   return results;
 }

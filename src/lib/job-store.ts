@@ -10,9 +10,19 @@ export interface JobState {
   createdAt: number;
 }
 
-const jobs = new Map<string, JobState>();
+// Attach to globalThis so the Map survives Next.js dev-mode HMR and
+// is shared across independently-compiled API route modules.
+const globalForJobs = globalThis as unknown as {
+  __synthpanel_jobs: Map<string, JobState> | undefined;
+};
 
-const JOB_TTL_MS = 30 * 60 * 1000; // 30 minutes
+if (!globalForJobs.__synthpanel_jobs) {
+  globalForJobs.__synthpanel_jobs = new Map<string, JobState>();
+}
+
+const jobs = globalForJobs.__synthpanel_jobs;
+
+const JOB_TTL_MS = 30 * 60 * 1000;
 
 function pruneStaleJobs() {
   const now = Date.now();
@@ -34,10 +44,15 @@ export function createJob(jobId: string, total: number): void {
     error: null,
     createdAt: Date.now(),
   });
+  console.log(`[job-store] Created job ${jobId} (total=${total}, map size=${jobs.size})`);
 }
 
 export function getJob(jobId: string): JobState | undefined {
-  return jobs.get(jobId);
+  const job = jobs.get(jobId);
+  if (!job) {
+    console.log(`[job-store] getJob(${jobId}) -> NOT FOUND (map size=${jobs.size}, keys=[${Array.from(jobs.keys()).join(", ")}])`);
+  }
+  return job;
 }
 
 export function updateJobStatus(jobId: string, message: string): void {
@@ -55,12 +70,16 @@ export function updateJobProgress(
   if (job) {
     job.progress = { current, total };
     job.statusMessage = message;
+    console.log(`[job-store] Progress ${jobId}: ${current}/${total}`);
   }
 }
 
 export function addPersonaResult(jobId: string, persona: PersonaResult): void {
   const job = jobs.get(jobId);
-  if (job) job.completedPersonas.push(persona);
+  if (job) {
+    job.completedPersonas.push(persona);
+    console.log(`[job-store] Persona ${persona.personaId} complete (PI=${persona.meanPI})`);
+  }
 }
 
 export function completeJob(jobId: string, results: AnalysisResponse): void {
@@ -69,6 +88,7 @@ export function completeJob(jobId: string, results: AnalysisResponse): void {
     job.status = "completed";
     job.results = results;
     job.statusMessage = "Analysis complete.";
+    console.log(`[job-store] Job ${jobId} COMPLETED (mean PI=${results.overallMeanPI})`);
   }
 }
 
@@ -78,5 +98,6 @@ export function failJob(jobId: string, errorMessage: string): void {
     job.status = "error";
     job.error = errorMessage;
     job.statusMessage = "Analysis failed.";
+    console.error(`[job-store] Job ${jobId} FAILED: ${errorMessage}`);
   }
 }

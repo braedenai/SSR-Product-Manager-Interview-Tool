@@ -26,10 +26,7 @@ function isRateLimitError(err: unknown): boolean {
   );
 }
 
-async function withRetry<T>(
-  fn: () => Promise<T>,
-  paceMs: number = 0
-): Promise<T> {
+async function withRetry<T>(fn: () => Promise<T>, paceMs: number = 0): Promise<T> {
   for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
     try {
       const result = await fn();
@@ -47,70 +44,75 @@ async function withRetry<T>(
   throw new Error("Max retries exceeded");
 }
 
-export interface ConcurrencyMode {
-  parallel: boolean;
-  paceMs: number;
+/**
+ * Single LLM call with retry.
+ */
+export async function generateOne(
+  apiKey: string,
+  systemPrompt: string,
+  userPrompt: string,
+  model: string = "gemini-2.5-flash",
+  paceMs: number = 0
+): Promise<string> {
+  const client = getClient(apiKey);
+  return withRetry(async () => {
+    const response = await client.models.generateContent({
+      model,
+      contents: userPrompt,
+      config: {
+        temperature: 0.5,
+        maxOutputTokens: 256,
+        systemInstruction: systemPrompt,
+      },
+    });
+    return response.text ?? "";
+  }, paceMs);
 }
 
 /**
- * Try a batch of parallel calls. If any hit a rate limit,
- * signal that we need to fall back to sequential mode.
+ * Fire multiple LLM calls in parallel. Returns results in order.
+ * Throws on any failure (including rate limits).
  */
-export async function generatePersonaResponsesBatch(
+export async function generateParallel(
   apiKey: string,
-  calls: { systemPrompt: string; userPrompt: string }[],
-  mode: ConcurrencyMode
-): Promise<{ results: string[]; mode: ConcurrencyMode }> {
+  calls: { systemPrompt: string; userPrompt: string }[]
+): Promise<string[]> {
   const client = getClient(apiKey);
-  let currentMode = { ...mode };
+  const promises = calls.map((c) =>
+    client.models.generateContent({
+      model: "gemini-2.5-flash",
+      contents: c.userPrompt,
+      config: {
+        temperature: 0.5,
+        maxOutputTokens: 256,
+        systemInstruction: c.systemPrompt,
+      },
+    })
+  );
+  const responses = await Promise.all(promises);
+  return responses.map((r) => r.text ?? "");
+}
 
-  if (currentMode.parallel) {
-    try {
-      const promises = calls.map((c) =>
-        client.models.generateContent({
-          model: "gemini-2.5-flash",
-          contents: c.userPrompt,
-          config: {
-            temperature: 0.5,
-            maxOutputTokens: 256,
-            systemInstruction: c.systemPrompt,
-          },
-        })
-      );
-      const responses = await Promise.all(promises);
-      return {
-        results: responses.map((r) => r.text ?? ""),
-        mode: currentMode,
-      };
-    } catch (err: unknown) {
-      if (isRateLimitError(err)) {
-        currentMode = { parallel: false, paceMs: 4500 };
-        // Fall through to sequential below
-      } else {
-        throw err;
-      }
-    }
+/**
+ * Detect whether this API key has paid-tier rate limits
+ * by making a fast, cheap probe call.
+ */
+export async function detectTier(apiKey: string): Promise<"paid" | "free"> {
+  const client = getClient(apiKey);
+  try {
+    const fast = Array.from({ length: 3 }, () =>
+      client.models.generateContent({
+        model: "gemini-2.5-flash",
+        contents: "Say OK",
+        config: { maxOutputTokens: 5 },
+      })
+    );
+    await Promise.all(fast);
+    return "paid";
+  } catch (err: unknown) {
+    if (isRateLimitError(err)) return "free";
+    throw err;
   }
-
-  // Sequential with pacing and retry
-  const results: string[] = [];
-  for (const c of calls) {
-    const text = await withRetry(async () => {
-      const response = await client.models.generateContent({
-        model: "gemini-2.0-flash-lite",
-        contents: c.userPrompt,
-        config: {
-          temperature: 0.5,
-          maxOutputTokens: 256,
-          systemInstruction: c.systemPrompt,
-        },
-      });
-      return response.text ?? "";
-    }, currentMode.paceMs);
-    results.push(text);
-  }
-
-  return { results, mode: currentMode };
 }
 
 export async function getEmbeddingsBatch(
@@ -124,5 +126,5 @@ export async function getEmbeddingsBatch(
       contents: texts,
     });
     return (response.embeddings ?? []).map((e) => e.values ?? []);
-  });
+  }, 0);
 }

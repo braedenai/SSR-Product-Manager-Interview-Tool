@@ -1,8 +1,9 @@
 import { NextRequest } from "next/server";
 import {
-  generatePersonaResponsesBatch,
+  detectTier,
+  generateOne,
+  generateParallel,
   getEmbeddingsBatch,
-  ConcurrencyMode,
 } from "@/lib/gemini";
 import {
   buildPersonaSystemPrompt,
@@ -43,6 +44,8 @@ export async function POST(request: NextRequest) {
     const encoder = new TextEncoder();
     const stream = new ReadableStream({
       async start(controller) {
+        let keepaliveTimer: ReturnType<typeof setInterval> | null = null;
+
         function send(event: string, data: unknown) {
           controller.enqueue(
             encoder.encode(`data: ${JSON.stringify({ event, data })}\n\n`)
@@ -50,72 +53,88 @@ export async function POST(request: NextRequest) {
         }
 
         try {
-          // Build persona profiles
+          const startTime = Date.now();
+
+          // Build persona profiles and all calls
           const personaProfiles: Demographics[] = [];
           for (let i = 0; i < personaCount; i++) {
             personaProfiles.push(demographics[i % demographics.length]);
           }
-
           const elicitationPrompt = buildElicitationPrompt(concept);
+          const totalCalls = personaCount * samplesPerPersona;
 
-          // Build all LLM calls upfront
           const allCalls: { systemPrompt: string; userPrompt: string }[] = [];
           for (const demo of personaProfiles) {
-            const systemPrompt = buildPersonaSystemPrompt(demo);
+            const sp = buildPersonaSystemPrompt(demo);
             for (let s = 0; s < samplesPerPersona; s++) {
-              allCalls.push({ systemPrompt, userPrompt: elicitationPrompt });
+              allCalls.push({ systemPrompt: sp, userPrompt: elicitationPrompt });
             }
           }
 
-          // Phase 1: LLM elicitation — try parallel, fall back to sequential
+          // Keepalive ping every 10s to prevent connection timeout
+          keepaliveTimer = setInterval(() => {
+            send("ping", { ts: Date.now() });
+          }, 10_000);
+
+          // Detect tier
           send("phase", {
             phase: "llm",
-            message: "Generating persona responses...",
-            totalCalls: allCalls.length,
+            message: "Detecting API tier...",
+            totalCalls,
           });
 
-          let mode: ConcurrencyMode = { parallel: true, paceMs: 0 };
+          const tier = await detectTier(apiKey);
+          const isParallel = tier === "paid";
+
+          send("phase", {
+            phase: "llm",
+            message: isParallel
+              ? "Paid tier detected — running at full speed..."
+              : "Free tier detected — pacing requests...",
+            totalCalls,
+          });
+
+          // Phase 1: LLM elicitation
           const allResponses: string[] = [];
-          const PARALLEL_BATCH_SIZE = 10;
 
-          const startTime = Date.now();
-
-          if (mode.parallel) {
-            // Fire in batches of PARALLEL_BATCH_SIZE
-            for (let i = 0; i < allCalls.length; i += PARALLEL_BATCH_SIZE) {
-              const batch = allCalls.slice(i, i + PARALLEL_BATCH_SIZE);
-              const { results, mode: newMode } =
-                await generatePersonaResponsesBatch(apiKey, batch, mode);
-              mode = newMode;
+          if (isParallel) {
+            // Paid tier: fire in parallel batches of 10
+            const BATCH = 10;
+            for (let i = 0; i < allCalls.length; i += BATCH) {
+              const batch = allCalls.slice(i, i + BATCH);
+              const results = await generateParallel(apiKey, batch);
               allResponses.push(...results);
-
-              const completedPersonas = Math.floor(
-                allResponses.length / samplesPerPersona
-              );
 
               send("progress", {
-                phase: "llm",
                 completedCalls: allResponses.length,
-                totalCalls: allCalls.length,
-                completedPersonas,
+                totalCalls,
+                completedPersonas: Math.floor(allResponses.length / samplesPerPersona),
                 totalPersonas: personaCount,
                 elapsedMs: Date.now() - startTime,
-                isParallel: mode.parallel,
+                isParallel: true,
               });
-
-              // If we fell back to sequential, remaining are already done inside the batch call
-              if (!mode.parallel) break;
             }
-
-            // If we fell back mid-way, handle remaining calls sequentially
-            if (!mode.parallel && allResponses.length < allCalls.length) {
-              const remaining = allCalls.slice(allResponses.length);
-              const { results } = await generatePersonaResponsesBatch(
+          } else {
+            // Free tier: sequential with pacing, progress after every call
+            for (let i = 0; i < allCalls.length; i++) {
+              const c = allCalls[i];
+              const text = await generateOne(
                 apiKey,
-                remaining,
-                mode
+                c.systemPrompt,
+                c.userPrompt,
+                "gemini-2.0-flash-lite",
+                4500
               );
-              allResponses.push(...results);
+              allResponses.push(text);
+
+              send("progress", {
+                completedCalls: allResponses.length,
+                totalCalls,
+                completedPersonas: Math.floor(allResponses.length / samplesPerPersona),
+                totalPersonas: personaCount,
+                elapsedMs: Date.now() - startTime,
+                isParallel: false,
+              });
             }
           }
 
@@ -123,23 +142,17 @@ export async function POST(request: NextRequest) {
           const personaResponses: string[] = [];
           for (let i = 0; i < personaCount; i++) {
             const start = i * samplesPerPersona;
-            const samples = allResponses.slice(
-              start,
-              start + samplesPerPersona
-            );
+            const samples = allResponses.slice(start, start + samplesPerPersona);
             personaResponses.push(samples.join(" "));
           }
 
-          // Phase 2: Batch embed all persona responses in one call
+          // Phase 2: Batch embed all persona responses
           send("phase", {
             phase: "embed",
             message: "Computing semantic embeddings...",
           });
 
-          const responseEmbeddings = await getEmbeddingsBatch(
-            apiKey,
-            personaResponses
-          );
+          const responseEmbeddings = await getEmbeddingsBatch(apiKey, personaResponses);
 
           // Phase 3: Score all personas (pure math, instant)
           send("phase", {
@@ -155,7 +168,6 @@ export async function POST(request: NextRequest) {
               1
             );
             const pi = meanPurchaseIntent(likertDist);
-
             personas.push({
               personaId: i + 1,
               demographics: personaProfiles[i],
@@ -165,12 +177,10 @@ export async function POST(request: NextRequest) {
             });
           }
 
-          // Aggregate results
+          // Aggregate
           const overallMeanPI =
             Math.round(
-              (personas.reduce((sum, p) => sum + p.meanPI, 0) /
-                personas.length) *
-                100
+              (personas.reduce((sum, p) => sum + p.meanPI, 0) / personas.length) * 100
             ) / 100;
 
           const distributionAggregated = [0, 0, 0, 0, 0];
@@ -201,6 +211,7 @@ export async function POST(request: NextRequest) {
             err instanceof Error ? err.message : "Unknown error occurred";
           send("error", { message });
         } finally {
+          if (keepaliveTimer) clearInterval(keepaliveTimer);
           controller.close();
         }
       },

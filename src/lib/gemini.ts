@@ -81,7 +81,7 @@ export async function generatePersonaResponse(
   return withRetry("generateContent", async () => {
     const genAI = getGenAI(apiKey);
     const model = genAI.getGenerativeModel({
-      model: "gemini-2.5-flash-preview-04-17",
+      model: "gemini-3.1-flash-lite-preview",
       generationConfig: {
         temperature: 0.5,
         maxOutputTokens: 256,
@@ -100,7 +100,7 @@ export async function getEmbedding(
   return withRetry("embedContent", async () => {
     const genAI = getGenAI(apiKey);
     const model = genAI.getGenerativeModel({
-      model: "text-embedding-004",
+      model: "gemini-embedding-001",
     });
     const result = await model.embedContent(text);
     return result.embedding.values;

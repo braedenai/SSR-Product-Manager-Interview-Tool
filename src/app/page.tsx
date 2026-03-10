@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useCallback } from "react";
+import { useState, useCallback, useRef } from "react";
 import ApiKeyInput from "@/components/ApiKeyInput";
 import ConceptInput from "@/components/ConceptInput";
 import DemographicSelector from "@/components/DemographicSelector";
@@ -15,6 +15,8 @@ import {
   REGION_OPTIONS,
   ETHNICITY_OPTIONS,
 } from "@/types";
+
+const POLL_INTERVAL_MS = 2500;
 
 type AppState = "setup" | "running" | "results" | "error";
 
@@ -39,11 +41,68 @@ export default function Home() {
   const [completedPersonas, setCompletedPersonas] = useState<PersonaResult[]>(
     []
   );
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const canRun =
     apiKey.trim().length > 0 &&
     concept.trim().length > 10 &&
     profiles.length > 0;
+
+  const stopPolling = useCallback(() => {
+    if (pollRef.current) {
+      clearInterval(pollRef.current);
+      pollRef.current = null;
+    }
+  }, []);
+
+  const startPolling = useCallback(
+    (jobId: string) => {
+      let consecutiveErrors = 0;
+
+      pollRef.current = setInterval(async () => {
+        try {
+          const res = await fetch(
+            `/api/analyze/status?jobId=${encodeURIComponent(jobId)}`
+          );
+
+          if (!res.ok) {
+            consecutiveErrors++;
+            if (consecutiveErrors >= 5) {
+              stopPolling();
+              setError("Lost connection to analysis job.");
+              setAppState("error");
+            }
+            return;
+          }
+
+          consecutiveErrors = 0;
+          const data = await res.json();
+
+          setStatus(data.statusMessage);
+          setProgress(data.progress);
+          setCompletedPersonas(data.completedPersonas);
+
+          if (data.status === "completed" && data.results) {
+            stopPolling();
+            setResults(data.results);
+            setAppState("results");
+          } else if (data.status === "error") {
+            stopPolling();
+            setError(data.error || "Analysis failed on the server.");
+            setAppState("error");
+          }
+        } catch {
+          consecutiveErrors++;
+          if (consecutiveErrors >= 5) {
+            stopPolling();
+            setError("Network error while polling for results.");
+            setAppState("error");
+          }
+        }
+      }, POLL_INTERVAL_MS);
+    },
+    [stopPolling]
+  );
 
   const runAnalysis = useCallback(async () => {
     setAppState("running");
@@ -69,55 +128,15 @@ export default function Home() {
         throw new Error(err.error || "Analysis request failed");
       }
 
-      const reader = response.body?.getReader();
-      if (!reader) throw new Error("No response stream");
+      const { jobId } = await response.json();
+      if (!jobId) throw new Error("No job ID returned from server");
 
-      const decoder = new TextDecoder();
-      let buffer = "";
-
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split("\n\n");
-        buffer = lines.pop() || "";
-
-        for (const line of lines) {
-          if (!line.startsWith("data: ")) continue;
-          try {
-            const { event, data } = JSON.parse(line.slice(6));
-
-            switch (event) {
-              case "status":
-                setStatus(data);
-                break;
-              case "progress":
-                setProgress({ current: data.current, total: data.total });
-                setStatus(data.message);
-                break;
-              case "persona_complete":
-                setCompletedPersonas((prev) => [...prev, data]);
-                break;
-              case "complete":
-                setResults(data);
-                setAppState("results");
-                break;
-              case "error":
-                throw new Error(data.message);
-            }
-          } catch (e) {
-            if (e instanceof Error && e.message !== "Unexpected end of JSON input") {
-              throw e;
-            }
-          }
-        }
-      }
+      startPolling(jobId);
     } catch (e) {
       setError(e instanceof Error ? e.message : "An unknown error occurred");
       setAppState("error");
     }
-  }, [apiKey, concept, profiles, personaCount]);
+  }, [apiKey, concept, profiles, personaCount, startPolling]);
 
   const handleExport = useCallback(async () => {
     if (!results) return;
@@ -138,6 +157,7 @@ export default function Home() {
   }, [results]);
 
   const resetToSetup = () => {
+    stopPolling();
     setAppState("setup");
     setResults(null);
     setCompletedPersonas([]);

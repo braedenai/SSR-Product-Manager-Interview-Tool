@@ -52,7 +52,7 @@ export async function POST(request: NextRequest) {
             anchorSetEmbeddings.push(setEmbeddings);
           }
 
-          send("status", "Reference anchors embedded. Starting persona simulations...");
+          send("status", "Reference anchors embedded. Starting persona simulations (pacing requests to stay within API rate limits)...");
 
           // Build the list of personas to simulate
           const personaProfiles: Demographics[] = [];

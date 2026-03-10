@@ -5,7 +5,7 @@ import ApiKeyInput from "@/components/ApiKeyInput";
 import ConceptInput from "@/components/ConceptInput";
 import DemographicSelector from "@/components/DemographicSelector";
 import PersonaCountSelector from "@/components/PersonaCountSelector";
-import ProgressIndicator from "@/components/ProgressIndicator";
+import CountdownTimer from "@/components/CountdownTimer";
 import ResultsDashboard from "@/components/ResultsDashboard";
 import type { Demographics, AnalysisResponse, PersonaResult } from "@/types";
 import {
@@ -17,6 +17,7 @@ import {
 } from "@/types";
 
 const POLL_INTERVAL_MS = 2500;
+const INIT_GRACE_MS = 15000;
 
 type AppState = "setup" | "running" | "results" | "error";
 
@@ -41,6 +42,7 @@ export default function Home() {
   const [completedPersonas, setCompletedPersonas] = useState<PersonaResult[]>(
     []
   );
+  const [startTime, setStartTime] = useState<number>(0);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const canRun =
@@ -58,6 +60,7 @@ export default function Home() {
   const startPolling = useCallback(
     (jobId: string) => {
       let consecutiveErrors = 0;
+      const pollStart = Date.now();
 
       pollRef.current = setInterval(async () => {
         try {
@@ -66,8 +69,11 @@ export default function Home() {
           );
 
           if (!res.ok) {
+            if (res.status === 404 && Date.now() - pollStart < INIT_GRACE_MS) {
+              return;
+            }
             consecutiveErrors++;
-            if (consecutiveErrors >= 5) {
+            if (consecutiveErrors >= 10) {
               stopPolling();
               setError("Lost connection to analysis job.");
               setAppState("error");
@@ -93,7 +99,7 @@ export default function Home() {
           }
         } catch {
           consecutiveErrors++;
-          if (consecutiveErrors >= 5) {
+          if (consecutiveErrors >= 10) {
             stopPolling();
             setError("Network error while polling for results.");
             setAppState("error");
@@ -104,39 +110,42 @@ export default function Home() {
     [stopPolling]
   );
 
-  const runAnalysis = useCallback(async () => {
+  const runAnalysis = useCallback(() => {
     setAppState("running");
     setError("");
     setCompletedPersonas([]);
     setProgress({ current: 0, total: personaCount });
     setStatus("Initializing analysis pipeline...");
+    setStartTime(Date.now());
 
-    try {
-      const response = await fetch("/api/analyze", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          concept,
-          demographics: profiles,
-          personaCount,
-          apiKey,
-        }),
-      });
+    const jobId = `job_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
 
-      if (!response.ok) {
-        const err = await response.json();
-        throw new Error(err.error || "Analysis request failed");
+    startPolling(jobId);
+
+    fetch("/api/analyze", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        concept,
+        demographics: profiles,
+        personaCount,
+        apiKey,
+        jobId,
+      }),
+    }).then((res) => {
+      if (!res.ok) {
+        return res.json().then((err: { error?: string }) => {
+          stopPolling();
+          setError(err.error || "Analysis request failed");
+          setAppState("error");
+        });
       }
-
-      const { jobId } = await response.json();
-      if (!jobId) throw new Error("No job ID returned from server");
-
-      startPolling(jobId);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "An unknown error occurred");
+    }).catch((e) => {
+      stopPolling();
+      setError(e instanceof Error ? e.message : "Failed to start analysis");
       setAppState("error");
-    }
-  }, [apiKey, concept, profiles, personaCount, startPolling]);
+    });
+  }, [apiKey, concept, profiles, personaCount, startPolling, stopPolling]);
 
   const handleExport = useCallback(async () => {
     if (!results) return;
@@ -246,10 +255,11 @@ export default function Home() {
 
         {appState === "running" && (
           <div className="space-y-6">
-            <ProgressIndicator
+            <CountdownTimer
               status={status}
               current={progress.current}
               total={progress.total}
+              startTime={startTime}
             />
 
             {completedPersonas.length > 0 && (

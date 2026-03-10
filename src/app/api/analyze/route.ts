@@ -5,6 +5,7 @@ import { REFERENCE_ANCHOR_SETS } from "@/lib/reference-anchors";
 import { computeSSRScore, meanPurchaseIntent } from "@/lib/ssr-engine";
 import {
   createJob,
+  getJob,
   updateJobStatus,
   updateJobProgress,
   addPersonaResult,
@@ -20,6 +21,7 @@ interface AnalyzeBody {
   demographics: Demographics[];
   personaCount: number;
   apiKey: string;
+  jobId: string;
 }
 
 async function runAnalysis(jobId: string, body: AnalyzeBody) {
@@ -125,21 +127,23 @@ async function runAnalysis(jobId: string, body: AnalyzeBody) {
 export async function POST(request: NextRequest) {
   try {
     const body: AnalyzeBody = await request.json();
-    const { concept, apiKey, demographics, personaCount } = body;
+    const { concept, apiKey, demographics, personaCount, jobId } = body;
 
-    if (!concept || !apiKey || !demographics || demographics.length === 0) {
+    if (!concept || !apiKey || !demographics || demographics.length === 0 || !jobId) {
       return Response.json(
-        { error: "Missing required fields: concept, apiKey, and at least one demographic profile." },
+        { error: "Missing required fields: concept, apiKey, jobId, and at least one demographic profile." },
         { status: 400 }
       );
     }
 
-    const jobId = `job_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
     createJob(jobId, personaCount);
 
-    runAnalysis(jobId, body);
+    // Await keeps the Next.js execution context alive for the full analysis.
+    // The client doesn't wait for this response — it polls /api/analyze/status.
+    await runAnalysis(jobId, body);
 
-    return Response.json({ jobId });
+    const job = getJob(jobId);
+    return Response.json({ jobId, status: job?.status ?? "completed" });
   } catch {
     return Response.json({ error: "Invalid request body" }, { status: 400 });
   }

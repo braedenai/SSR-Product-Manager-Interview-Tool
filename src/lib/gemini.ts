@@ -1,12 +1,14 @@
-import { GoogleGenerativeAI } from "@google/generative-ai";
+import { GoogleGenAI } from "@google/genai";
 
-let genAIInstance: GoogleGenerativeAI | null = null;
+let clientInstance: GoogleGenAI | null = null;
+let currentKey: string = "";
 
-function getGenAI(apiKey: string): GoogleGenerativeAI {
-  if (!genAIInstance) {
-    genAIInstance = new GoogleGenerativeAI(apiKey);
+function getClient(apiKey: string): GoogleGenAI {
+  if (!clientInstance || currentKey !== apiKey) {
+    clientInstance = new GoogleGenAI({ apiKey });
+    currentKey = apiKey;
   }
-  return genAIInstance;
+  return clientInstance;
 }
 
 export async function generatePersonaResponse(
@@ -14,39 +16,39 @@ export async function generatePersonaResponse(
   systemPrompt: string,
   userPrompt: string
 ): Promise<string> {
-  const genAI = getGenAI(apiKey);
-  const model = genAI.getGenerativeModel({
+  const client = getClient(apiKey);
+  const response = await client.models.generateContent({
     model: "gemini-2.5-flash",
-    generationConfig: {
+    contents: userPrompt,
+    config: {
       temperature: 0.5,
       maxOutputTokens: 256,
+      systemInstruction: systemPrompt,
     },
-    systemInstruction: systemPrompt,
   });
-
-  const result = await model.generateContent(userPrompt);
-  return result.response.text();
+  return response.text ?? "";
 }
 
 export async function getEmbedding(
   apiKey: string,
   text: string
 ): Promise<number[]> {
-  const genAI = getGenAI(apiKey);
-  const model = genAI.getGenerativeModel({
+  const client = getClient(apiKey);
+  const response = await client.models.embedContent({
     model: "gemini-embedding-001",
+    contents: text,
   });
-
-  const result = await model.embedContent(text);
-  return result.embedding.values;
+  return response.embeddings?.[0]?.values ?? [];
 }
 
 export async function getEmbeddings(
   apiKey: string,
   texts: string[]
 ): Promise<number[][]> {
-  const results = await Promise.all(
-    texts.map((text) => getEmbedding(apiKey, text))
-  );
-  return results;
+  const client = getClient(apiKey);
+  const response = await client.models.embedContent({
+    model: "gemini-embedding-001",
+    contents: texts,
+  });
+  return (response.embeddings ?? []).map((e) => e.values ?? []);
 }

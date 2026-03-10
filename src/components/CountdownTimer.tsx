@@ -80,8 +80,8 @@ interface Props {
   totalPersonas: number;
   /** Completed personas */
   completedPersonas: number;
-  /** Whether we're running in parallel mode */
-  isParallel: boolean | null;
+  /** Whether we've hit rate limits */
+  isRateLimited: boolean | null;
   /** Current phase: llm, embed, score, done */
   phase: "llm" | "embed" | "score" | "done";
   /** Status message from the server */
@@ -103,7 +103,7 @@ export default function CountdownTimer({
   completedCalls,
   totalPersonas,
   completedPersonas,
-  isParallel,
+  isRateLimited,
   phase,
   statusMessage,
 }: Props) {
@@ -115,15 +115,12 @@ export default function CountdownTimer({
   // Set initial estimate when component mounts or params change
   useEffect(() => {
     if (estimatedTotalSec === 0) {
-      // Initial optimistic estimate assuming parallel
-      const baseEstimate = isParallel !== false
-        ? Math.max(5, totalCalls * 0.3 + 3)
-        : totalCalls * 5 + 3;
+      const baseEstimate = totalCalls * 6 + 5;
       setEstimatedTotalSec(baseEstimate);
       setRemainingSec(baseEstimate);
       startTimeRef.current = Date.now();
     }
-  }, [totalCalls, isParallel, estimatedTotalSec]);
+  }, [totalCalls, estimatedTotalSec]);
 
   // Recalculate estimate when progress updates come in
   const recalculate = useCallback(() => {
@@ -182,7 +179,7 @@ export default function CountdownTimer({
 
   return (
     <div className="card">
-      {isParallel === false && !noticeDismissed && (
+      {isRateLimited === true && !noticeDismissed && (
         <FreeTierNotice onDismiss={() => setNoticeDismissed(true)} />
       )}
       <div className="flex items-center gap-8">
@@ -267,18 +264,18 @@ export default function CountdownTimer({
             </div>
           )}
 
-          {/* Mode indicator */}
-          {isParallel !== null && (
+          {/* Rate limit indicator */}
+          {isRateLimited !== null && (
             <div className="flex items-center gap-2">
               <span
                 className={`inline-block h-2 w-2 rounded-full ${
-                  isParallel ? "bg-green-500" : "bg-yellow-500"
+                  isRateLimited ? "bg-yellow-500" : "bg-green-500"
                 }`}
               />
               <span className="text-xs text-gray-400">
-                {isParallel
-                  ? "Parallel mode — running at full speed"
-                  : "Sequential mode — pacing to stay within rate limits"}
+                {isRateLimited
+                  ? "Pacing requests to stay within free-tier rate limits"
+                  : "Running smoothly — no rate limits hit"}
               </span>
             </div>
           )}

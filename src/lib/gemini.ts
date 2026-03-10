@@ -15,26 +15,48 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-const MAX_RETRIES = 5;
+const LLM_MODEL = "gemini-3.1-flash-lite-preview";
+const EMBED_MODEL = "gemini-embedding-001";
+const MAX_RETRIES = 4;
 
 function isRateLimitError(err: unknown): boolean {
-  const message = err instanceof Error ? err.message : String(err);
-  return (
-    message.includes("429") ||
-    message.includes("RESOURCE_EXHAUSTED") ||
-    message.includes("quota")
-  );
+  const msg = err instanceof Error ? err.message : String(err);
+  return msg.includes("429") || msg.includes("RESOURCE_EXHAUSTED") || msg.includes("quota");
 }
 
-async function withRetry<T>(fn: () => Promise<T>, paceMs: number = 0): Promise<T> {
+export interface CallResult {
+  text: string;
+  hitRateLimit: boolean;
+}
+
+/**
+ * Single LLM call with short retry backoffs.
+ * Returns the result plus whether it encountered a rate limit (even if retried successfully).
+ */
+export async function generateOne(
+  apiKey: string,
+  systemPrompt: string,
+  userPrompt: string
+): Promise<CallResult> {
+  const client = getClient(apiKey);
+  let hitRateLimit = false;
+
   for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
     try {
-      const result = await fn();
-      if (paceMs > 0) await sleep(paceMs);
-      return result;
+      const response = await client.models.generateContent({
+        model: LLM_MODEL,
+        contents: userPrompt,
+        config: {
+          temperature: 0.5,
+          maxOutputTokens: 256,
+          systemInstruction: systemPrompt,
+        },
+      });
+      return { text: response.text ?? "", hitRateLimit };
     } catch (err: unknown) {
       if (isRateLimitError(err) && attempt < MAX_RETRIES - 1) {
-        const backoff = Math.pow(2, attempt) * 10_000 + Math.random() * 5_000;
+        hitRateLimit = true;
+        const backoff = 5_000 + attempt * 4_000 + Math.random() * 2_000;
         await sleep(backoff);
         continue;
       }
@@ -44,87 +66,26 @@ async function withRetry<T>(fn: () => Promise<T>, paceMs: number = 0): Promise<T
   throw new Error("Max retries exceeded");
 }
 
-/**
- * Single LLM call with retry.
- */
-export async function generateOne(
-  apiKey: string,
-  systemPrompt: string,
-  userPrompt: string,
-  model: string = "gemini-2.5-flash",
-  paceMs: number = 0
-): Promise<string> {
-  const client = getClient(apiKey);
-  return withRetry(async () => {
-    const response = await client.models.generateContent({
-      model,
-      contents: userPrompt,
-      config: {
-        temperature: 0.5,
-        maxOutputTokens: 256,
-        systemInstruction: systemPrompt,
-      },
-    });
-    return response.text ?? "";
-  }, paceMs);
-}
-
-/**
- * Fire multiple LLM calls in parallel. Returns results in order.
- * Throws on any failure (including rate limits).
- */
-export async function generateParallel(
-  apiKey: string,
-  calls: { systemPrompt: string; userPrompt: string }[]
-): Promise<string[]> {
-  const client = getClient(apiKey);
-  const promises = calls.map((c) =>
-    client.models.generateContent({
-      model: "gemini-2.5-flash",
-      contents: c.userPrompt,
-      config: {
-        temperature: 0.5,
-        maxOutputTokens: 256,
-        systemInstruction: c.systemPrompt,
-      },
-    })
-  );
-  const responses = await Promise.all(promises);
-  return responses.map((r) => r.text ?? "");
-}
-
-/**
- * Detect whether this API key has paid-tier rate limits
- * by making a fast, cheap probe call.
- */
-export async function detectTier(apiKey: string): Promise<"paid" | "free"> {
-  const client = getClient(apiKey);
-  try {
-    const fast = Array.from({ length: 3 }, () =>
-      client.models.generateContent({
-        model: "gemini-2.5-flash",
-        contents: "Say OK",
-        config: { maxOutputTokens: 5 },
-      })
-    );
-    await Promise.all(fast);
-    return "paid";
-  } catch (err: unknown) {
-    if (isRateLimitError(err)) return "free";
-    throw err;
-  }
-}
-
 export async function getEmbeddingsBatch(
   apiKey: string,
   texts: string[]
 ): Promise<number[][]> {
   const client = getClient(apiKey);
-  return withRetry(async () => {
-    const response = await client.models.embedContent({
-      model: "gemini-embedding-001",
-      contents: texts,
-    });
-    return (response.embeddings ?? []).map((e) => e.values ?? []);
-  }, 0);
+  for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
+    try {
+      const response = await client.models.embedContent({
+        model: EMBED_MODEL,
+        contents: texts,
+      });
+      return (response.embeddings ?? []).map((e) => e.values ?? []);
+    } catch (err: unknown) {
+      if (isRateLimitError(err) && attempt < MAX_RETRIES - 1) {
+        const backoff = 5_000 + attempt * 4_000 + Math.random() * 2_000;
+        await sleep(backoff);
+        continue;
+      }
+      throw err;
+    }
+  }
+  throw new Error("Max retries exceeded");
 }

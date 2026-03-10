@@ -43,7 +43,7 @@ export default function Home() {
   const [totalCalls, setTotalCalls] = useState(0);
   const [completedCalls, setCompletedCalls] = useState(0);
   const [completedPersonas, setCompletedPersonas] = useState(0);
-  const [isParallel, setIsParallel] = useState<boolean | null>(null);
+  const [isRateLimited, setIsRateLimited] = useState<boolean | null>(null);
 
   const canRun =
     apiKey.trim().length > 0 &&
@@ -58,7 +58,7 @@ export default function Home() {
     setStatusMessage("Starting analysis...");
     setCompletedCalls(0);
     setCompletedPersonas(0);
-    setIsParallel(null);
+    setIsRateLimited(null);
     setTotalCalls(personaCount * (quickMode ? 1 : 2));
 
     try {
@@ -107,8 +107,8 @@ export default function Home() {
               case "progress":
                 setCompletedCalls(data.completedCalls);
                 setCompletedPersonas(data.completedPersonas);
-                if (data.isParallel !== undefined)
-                  setIsParallel(data.isParallel);
+                if (data.isRateLimited !== undefined)
+                  setIsRateLimited(data.isRateLimited);
                 break;
               case "complete":
                 setTimerPhase("done");
@@ -159,7 +159,7 @@ export default function Home() {
     setCompletedCalls(0);
     setCompletedPersonas(0);
     setTimerPhase("llm");
-    setIsParallel(null);
+    setIsRateLimited(null);
   };
 
   return (
@@ -252,7 +252,7 @@ export default function Home() {
               completedCalls={completedCalls}
               totalPersonas={personaCount}
               completedPersonas={completedPersonas}
-              isParallel={isParallel}
+              isRateLimited={isRateLimited}
               phase={timerPhase}
               statusMessage={statusMessage}
             />

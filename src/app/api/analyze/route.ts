@@ -1,10 +1,5 @@
 import { NextRequest } from "next/server";
-import {
-  detectTier,
-  generateOne,
-  generateParallel,
-  getEmbeddingsBatch,
-} from "@/lib/gemini";
+import { generateOne, getEmbeddingsBatch } from "@/lib/gemini";
 import {
   buildPersonaSystemPrompt,
   buildElicitationPrompt,
@@ -55,14 +50,16 @@ export async function POST(request: NextRequest) {
         try {
           const startTime = Date.now();
 
-          // Build persona profiles and all calls
+          // Build persona profiles
           const personaProfiles: Demographics[] = [];
           for (let i = 0; i < personaCount; i++) {
             personaProfiles.push(demographics[i % demographics.length]);
           }
+
           const elicitationPrompt = buildElicitationPrompt(concept);
           const totalCalls = personaCount * samplesPerPersona;
 
+          // Build all calls
           const allCalls: { systemPrompt: string; userPrompt: string }[] = [];
           for (const demo of personaProfiles) {
             const sp = buildPersonaSystemPrompt(demo);
@@ -71,70 +68,56 @@ export async function POST(request: NextRequest) {
             }
           }
 
-          // Keepalive ping every 10s to prevent connection timeout
+          // Keepalive every 8 seconds
           keepaliveTimer = setInterval(() => {
             send("ping", { ts: Date.now() });
-          }, 10_000);
-
-          // Detect tier
-          send("phase", {
-            phase: "llm",
-            message: "Detecting API tier...",
-            totalCalls,
-          });
-
-          const tier = await detectTier(apiKey);
-          const isParallel = tier === "paid";
+          }, 8_000);
 
           send("phase", {
             phase: "llm",
-            message: isParallel
-              ? "Paid tier detected — running at full speed..."
-              : "Free tier detected — pacing requests...",
+            message: "Generating persona responses...",
             totalCalls,
           });
 
-          // Phase 1: LLM elicitation
+          // Adaptive pacing: start conservative, speed up if no rate limits hit
+          let paceMs = 5000;
+          let consecutiveSuccess = 0;
           const allResponses: string[] = [];
+          let everHitRateLimit = false;
 
-          if (isParallel) {
-            // Paid tier: fire in parallel batches of 10
-            const BATCH = 10;
-            for (let i = 0; i < allCalls.length; i += BATCH) {
-              const batch = allCalls.slice(i, i + BATCH);
-              const results = await generateParallel(apiKey, batch);
-              allResponses.push(...results);
+          for (let i = 0; i < allCalls.length; i++) {
+            const c = allCalls[i];
+            const { text, hitRateLimit } = await generateOne(
+              apiKey,
+              c.systemPrompt,
+              c.userPrompt
+            );
+            allResponses.push(text);
 
-              send("progress", {
-                completedCalls: allResponses.length,
-                totalCalls,
-                completedPersonas: Math.floor(allResponses.length / samplesPerPersona),
-                totalPersonas: personaCount,
-                elapsedMs: Date.now() - startTime,
-                isParallel: true,
-              });
+            if (hitRateLimit) {
+              everHitRateLimit = true;
+              consecutiveSuccess = 0;
+              paceMs = Math.min(paceMs + 2000, 8000);
+            } else {
+              consecutiveSuccess++;
+              if (consecutiveSuccess >= 3 && paceMs > 1000) {
+                paceMs = Math.max(paceMs - 1000, 500);
+              }
             }
-          } else {
-            // Free tier: sequential with pacing, progress after every call
-            for (let i = 0; i < allCalls.length; i++) {
-              const c = allCalls[i];
-              const text = await generateOne(
-                apiKey,
-                c.systemPrompt,
-                c.userPrompt,
-                "gemini-2.0-flash-lite",
-                4500
-              );
-              allResponses.push(text);
 
-              send("progress", {
-                completedCalls: allResponses.length,
-                totalCalls,
-                completedPersonas: Math.floor(allResponses.length / samplesPerPersona),
-                totalPersonas: personaCount,
-                elapsedMs: Date.now() - startTime,
-                isParallel: false,
-              });
+            send("progress", {
+              completedCalls: allResponses.length,
+              totalCalls,
+              completedPersonas: Math.floor(allResponses.length / samplesPerPersona),
+              totalPersonas: personaCount,
+              elapsedMs: Date.now() - startTime,
+              isParallel: false,
+              isRateLimited: everHitRateLimit,
+            });
+
+            // Pace before next call (skip after last one)
+            if (i < allCalls.length - 1) {
+              await new Promise((r) => setTimeout(r, paceMs));
             }
           }
 
@@ -146,7 +129,7 @@ export async function POST(request: NextRequest) {
             personaResponses.push(samples.join(" "));
           }
 
-          // Phase 2: Batch embed all persona responses
+          // Phase 2: Batch embed
           send("phase", {
             phase: "embed",
             message: "Computing semantic embeddings...",
@@ -154,7 +137,7 @@ export async function POST(request: NextRequest) {
 
           const responseEmbeddings = await getEmbeddingsBatch(apiKey, personaResponses);
 
-          // Phase 3: Score all personas (pure math, instant)
+          // Phase 3: Score (instant math)
           send("phase", {
             phase: "score",
             message: "Calculating purchase intent scores...",

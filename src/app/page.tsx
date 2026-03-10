@@ -5,9 +5,10 @@ import ApiKeyInput from "@/components/ApiKeyInput";
 import ConceptInput from "@/components/ConceptInput";
 import DemographicSelector from "@/components/DemographicSelector";
 import PersonaCountSelector from "@/components/PersonaCountSelector";
-import ProgressIndicator from "@/components/ProgressIndicator";
+import ModeToggle from "@/components/ModeToggle";
+import CountdownTimer from "@/components/CountdownTimer";
 import ResultsDashboard from "@/components/ResultsDashboard";
-import type { Demographics, AnalysisResponse, PersonaResult } from "@/types";
+import type { Demographics, AnalysisResponse } from "@/types";
 import {
   AGE_OPTIONS,
   GENDER_OPTIONS,
@@ -31,14 +32,18 @@ export default function Home() {
     },
   ]);
   const [personaCount, setPersonaCount] = useState(10);
+  const [quickMode, setQuickMode] = useState(true);
   const [appState, setAppState] = useState<AppState>("setup");
-  const [status, setStatus] = useState("");
-  const [progress, setProgress] = useState({ current: 0, total: 0 });
   const [results, setResults] = useState<AnalysisResponse | null>(null);
   const [error, setError] = useState("");
-  const [completedPersonas, setCompletedPersonas] = useState<PersonaResult[]>(
-    []
-  );
+
+  // Timer state
+  const [timerPhase, setTimerPhase] = useState<"llm" | "embed" | "score" | "done">("llm");
+  const [statusMessage, setStatusMessage] = useState("");
+  const [totalCalls, setTotalCalls] = useState(0);
+  const [completedCalls, setCompletedCalls] = useState(0);
+  const [completedPersonas, setCompletedPersonas] = useState(0);
+  const [isParallel, setIsParallel] = useState<boolean | null>(null);
 
   const canRun =
     apiKey.trim().length > 0 &&
@@ -48,9 +53,13 @@ export default function Home() {
   const runAnalysis = useCallback(async () => {
     setAppState("running");
     setError("");
-    setCompletedPersonas([]);
-    setProgress({ current: 0, total: personaCount });
-    setStatus("Initializing analysis pipeline...");
+    setResults(null);
+    setTimerPhase("llm");
+    setStatusMessage("Starting analysis...");
+    setCompletedCalls(0);
+    setCompletedPersonas(0);
+    setIsParallel(null);
+    setTotalCalls(personaCount * (quickMode ? 1 : 2));
 
     try {
       const response = await fetch("/api/analyze", {
@@ -61,6 +70,7 @@ export default function Home() {
           demographics: profiles,
           personaCount,
           apiKey,
+          quickMode,
         }),
       });
 
@@ -89,25 +99,31 @@ export default function Home() {
             const { event, data } = JSON.parse(line.slice(6));
 
             switch (event) {
-              case "status":
-                setStatus(data);
+              case "phase":
+                setTimerPhase(data.phase);
+                setStatusMessage(data.message);
+                if (data.totalCalls) setTotalCalls(data.totalCalls);
                 break;
               case "progress":
-                setProgress({ current: data.current, total: data.total });
-                setStatus(data.message);
-                break;
-              case "persona_complete":
-                setCompletedPersonas((prev) => [...prev, data]);
+                setCompletedCalls(data.completedCalls);
+                setCompletedPersonas(data.completedPersonas);
+                if (data.isParallel !== undefined)
+                  setIsParallel(data.isParallel);
                 break;
               case "complete":
+                setTimerPhase("done");
+                setStatusMessage("Analysis complete!");
                 setResults(data);
-                setAppState("results");
+                setTimeout(() => setAppState("results"), 800);
                 break;
               case "error":
                 throw new Error(data.message);
             }
           } catch (e) {
-            if (e instanceof Error && e.message !== "Unexpected end of JSON input") {
+            if (
+              e instanceof Error &&
+              e.message !== "Unexpected end of JSON input"
+            ) {
               throw e;
             }
           }
@@ -117,7 +133,7 @@ export default function Home() {
       setError(e instanceof Error ? e.message : "An unknown error occurred");
       setAppState("error");
     }
-  }, [apiKey, concept, profiles, personaCount]);
+  }, [apiKey, concept, profiles, personaCount, quickMode]);
 
   const handleExport = useCallback(async () => {
     if (!results) return;
@@ -140,8 +156,10 @@ export default function Home() {
   const resetToSetup = () => {
     setAppState("setup");
     setResults(null);
-    setCompletedPersonas([]);
-    setProgress({ current: 0, total: 0 });
+    setCompletedCalls(0);
+    setCompletedPersonas(0);
+    setTimerPhase("llm");
+    setIsParallel(null);
   };
 
   return (
@@ -198,10 +216,13 @@ export default function Home() {
             <ApiKeyInput apiKey={apiKey} onChange={setApiKey} />
             <ConceptInput concept={concept} onChange={setConcept} />
             <DemographicSelector profiles={profiles} onChange={setProfiles} />
-            <PersonaCountSelector
-              count={personaCount}
-              onChange={setPersonaCount}
-            />
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+              <PersonaCountSelector
+                count={personaCount}
+                onChange={setPersonaCount}
+              />
+              <ModeToggle quickMode={quickMode} onChange={setQuickMode} />
+            </div>
 
             <div className="flex justify-center pt-4">
               <button
@@ -226,44 +247,15 @@ export default function Home() {
 
         {appState === "running" && (
           <div className="space-y-6">
-            <ProgressIndicator
-              status={status}
-              current={progress.current}
-              total={progress.total}
+            <CountdownTimer
+              totalCalls={totalCalls}
+              completedCalls={completedCalls}
+              totalPersonas={personaCount}
+              completedPersonas={completedPersonas}
+              isParallel={isParallel}
+              phase={timerPhase}
+              statusMessage={statusMessage}
             />
-
-            {completedPersonas.length > 0 && (
-              <div className="card">
-                <h3 className="text-sm font-semibold text-gray-500 uppercase tracking-wider mb-3">
-                  Completed Personas
-                </h3>
-                <div className="space-y-2">
-                  {completedPersonas.map((p) => (
-                    <div
-                      key={p.personaId}
-                      className="flex items-center justify-between py-2 px-3 bg-gray-50 rounded-lg"
-                    >
-                      <span className="text-sm text-gray-600">
-                        Persona {p.personaId} &middot;{" "}
-                        {p.demographics.age}, {p.demographics.gender},{" "}
-                        {p.demographics.region}
-                      </span>
-                      <span
-                        className={`text-sm font-semibold ${
-                          p.meanPI >= 3.5
-                            ? "text-green-600"
-                            : p.meanPI >= 2.5
-                              ? "text-yellow-600"
-                              : "text-red-600"
-                        }`}
-                      >
-                        PI: {p.meanPI.toFixed(2)}
-                      </span>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
           </div>
         )}
 
@@ -277,7 +269,10 @@ export default function Home() {
               Analysis Failed
             </h3>
             <p className="text-sm text-red-600 mb-4">{error}</p>
-            <button onClick={resetToSetup} className="btn-primary bg-red-600 hover:bg-red-700">
+            <button
+              onClick={resetToSetup}
+              className="btn-primary bg-red-600 hover:bg-red-700"
+            >
               Try Again
             </button>
           </div>

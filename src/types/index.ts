@@ -19,6 +19,7 @@ export interface AnalysisRequest {
   demographics: Demographics[];
   personaCount: number;
   apiKey: string;
+  quickMode: boolean;
 }
 
 export interface AnalysisResponse {
